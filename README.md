@@ -32,12 +32,52 @@ Due to the excellent performance in yielding high-quality, zero-shot segmentatio
 
 
 ## 🥳 *Birkhoff* 🍾
+### HyperLinear Operator
+The previous [Hyper-Compression](https://github.com/Juntongkuki/Hyper-Compression.git) is vector-wise, which is incompatible with the matrix product in GPU acceleration that is “block-wise" operated. Therefore, Hyper-Compression needs to decompress the entire matrix first before doing the matrix product, which has large room for improvement. In the *Birkhoff* algorithm, we design a “block-wise" compression and decompression, respectively. Then, we further propose **Hyperlinear** to fuse decompression and matrix product, which can greatly expedite the inference because linear layers including Q, K, V attention modules usually dominate SAM.
 
-### Experimental Results
+<div align="center">
+  <img src="assets/hyperlinear.png" width="80%" />
+</div>
+<p align="center"><b>Fig. </b> Technical evolution of decompression: from theoretical element-wise operation to vector-wise operation, and finally to our proposed block-wise one (HyperLinear) to facilitate operator fusion.</p>
+
+
+### Segment Everything Visualization
+Visualization comparisons indicate that *Birkhoff*-compressed model preserves the boundaries of masks to such an extent that virtually no noticeable visual differences from those of the original models are discernible.
 <div align="center">
   <img src="assets/seg_every.png" width="85%" />
 </div>
 <p align="center"><b>Fig. </b> We select SAM-B, SAM-L, and SAM-H for a visual comparison of the Segment Everything task before and after Birkhoff compression.</p>
+
+
+### Compression Performance
+This whole [table](assets/performance.pdf) is the accuracy and sizes (MB) of 18 SAMs and their corresponding *Birkhoff*-compressed versions on three datasets (COCO, LVIS, and SA-1B). For example, the following tables illustrate the results of SAM-B, SAM-L, SAM-H: 
+<div align="center">
+  <img src="assets/eg_perform.png" width="85%" />
+</div>
+
+
+### Compression Time and Ratio
+The majority of models can be fully compressed within 60 seconds. In terms of the compression ratio, most models can be compressed by more than 4.3×, with the highest ratio reaching 5.17×. Even for variants such as EdgeSAM, MobileSAM, and SAM-HQ-Tiny, which have little remaining compressibility after distillation from SAM, our method can still achieve the compression ratios in excess of 3.3×.
+<div align="center">
+  <img src="assets/Time_Ratio.png" width="75%" />
+</div>
+<p align="center"><b>Fig. </b> The compression time and achieved compression ratios for 18 SAMs using Birkhoff.</p>
+
+
+
+### Comparison with Other Data-Free Compression Methods
+We compare our *Birkhoff* with other data-free methods, including MinMax, Percentile, and OMSE, and fine-tuning-based methods, such as PTQ4SAM, AdaRound, BRECQ and QDrop. The following table presents a comparison of the mAP scores before and after compressing SAM-B, SAM-L, SAM-H models on the COCO dataset using box prompts. Although *Birkhoff* currently does not exceed the compression ratio of the INT6 quantization, it demonstrates compelling merits under stringent constraints: compressing without fine-tuning datasets while rendering almost lossless compression.
+<div align="center">
+  <img src="assets/comparison.png" width="55%" />
+</div>
+<p align="center"><b>Fig. </b> Image segmentation results (mAP) on COCO dataset using box prompts obtained from objection detection results produced by YOLOX.</p>
+
+### Inference Time
+We evaluate the inference speed of the models before and after replacing the HyperLinear operator. As shown in Table, we conduct comparative experiments on six different models, randomly using a small subset of the SA-1B dataset to measure the average inference time per segmentation. The results indicate that, although the inference speed slightly decreases after incorporating the HyperLinear operator, the performance gap is minimal and barely noticeable to human perception. The data further illustrates that the larger the model, the smaller gap in inference. For example, in the case of SAM-H, the inference speed decreases by only 3.94%. This is attributed to the nature of our method, where a single-memory access allows the decoding of two parameters, thereby improving the L2 cache hit rate of the operator. For smaller models, most parameters can be accessed directly from registers, ensuring fast memory access. However, for larger models, our method becomes increasingly beneficial by improving the efficiency of memory access. Moreover, we emphasize that though the *Birkhoff*-compressed SAMs still infer more slowly than the original, their differences are at the level of ms, which shall not hurt the user experience.
+<div align="center">
+  <img src="assets/inference.png" width="60%" />
+</div>
+<p align="center"><b>Fig. </b> Comparison of inference time between the compressed model and the original.</p>
 
 
 ## Requirements
