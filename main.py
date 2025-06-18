@@ -18,6 +18,7 @@ from tqdm import tqdm
 import json
 import copy
 import random
+import argparse
 
 
 def random_color():
@@ -95,28 +96,42 @@ def seg_box(model_class, img_file_name, res_ins):
 
     return res_ins_new
 
-
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', type=str, default= 'encode', choices=['encode', 'inference'], help="encode : compress a given model ; inference : an inference demo of segment anything task")
+    parser.add_argument('--model_name', type=str, default='sam_hq_vit_h')
+    parser.add_argument('--rect_l', type=float, default=0.1, help='The length of sides of the inner square')
+    parser.add_argument('--num_inner_list', type=list, default=[1225, 1600], help='The number of the sample nodes in the inner square')
+    parser.add_argument('--class_max', type=int, default=3, help='The maximum number of categories of points outside the inner square')
+    parser.add_argument('--loss_max', type=float, default=0.001, help='The maximum loss per layer')
+    parser.add_argument('--loss_threshold', type=float, default=0.001, help='The expected loss per layer')
+    parser.add_argument('--set_loss_limit', type=list, default=[True, 0.006],
+                        help='If the loss of a layer exceeds this limit, the original parameters will be saved directly to prevent significant impact on model performance')
+    parser.add_argument('--checkpoint_path', type=str, default='./sam_family/checkpoints/sam_hq_vit_h.pth')
+    parser.add_argument('--cuda', type=int, default=0)
+    return parser.parse_args()
 
 if __name__ == '__main__':
+    args = get_args()
 
-    rect_l = 0.1
-    num_inner_list = [1225, 1600]
-    class_max = 3
-    loss_max = 0.001
-    loss_hope = 0.001
-    stop_threshold = [True, 0.006]
+    rect_l = args.rect_l
+    num_inner_list = args.num_inner_list
+    class_max = args.class_max
+    loss_max = args.loss_max
+    loss_hope = args.loss_threshold
+    stop_threshold = args.set_loss_limit
 
 
-    mode = 'inference'  # 'encode' or 'inference'
-    model_name = 'sam_hq_vit_h'
-    device = 'cuda:3'
+    mode = args.mode  # 'encode' or 'inference'
+    model_name = args.model_name
+    device = f'cuda:{args.cuda}'
 
     # encoding save path
     Save_Param_Path = f'./compressed_result/{model_name}/'
 
 
-    check_points = './sam_family/checkpoints/sam_hq_vit_h.pth'
-    # check_points = '/home/ET/jtfan/MyData/checkpoints/sam_hq_vit_h.pth'
+    check_points = args.checkpoint_path
+
 
     if mode == 'encode':
         model_class = SegAny(model_name=model_name,
@@ -154,9 +169,8 @@ if __name__ == '__main__':
 
     elif mode == 'inference':
 
-        index_cuda = 0
-        device_hyper = f'cuda:{index_cuda}'
-        device = f'cuda:{index_cuda}'
+        device_hyper = f'cuda:{args.cuda}'
+        device = f'cuda:{args.cuda}'
 
         hyper_file = Save_Param_Path + 'hyper_model.safetensors'
         hyper_model_class = SegAny(model_name=model_name,
@@ -168,15 +182,6 @@ if __name__ == '__main__':
         hyper_model_predictor = hyper_model_class.predictor_with_point_prompt
         hyper_model = hyper_model_class.model
 
-
-
-        model_class = SegAny(model_name=model_name,
-                                   checkpoint=check_points,
-                                   device=device,
-                                   hyper_load=False
-                                   )
-        model_predictor = model_class.predictor_with_point_prompt
-        model = model_class.model
 
 
         ###########################
