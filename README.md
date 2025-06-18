@@ -52,7 +52,7 @@ Visualization comparisons indicate that *Birkhoff*-compressed model preserves th
 ### Compression Performance
 This whole [table](assets/performance.pdf) is the accuracy and sizes (MB) of 18 SAMs and their corresponding *Birkhoff*-compressed versions on three datasets (COCO, LVIS, and SA-1B). For example, the following tables illustrate the results of SAM-B, SAM-L, SAM-H: 
 <div align="center">
-  <img src="assets/eg_perform.png" width="85%" />
+  <img src="assets/eg_perform.png" width="100%" />
 </div>
 
 
