@@ -6,6 +6,7 @@
 
 
 ## News 📢 
+* **2026/05/29** : Following the revision of our paper, we have upgraded the relevant code. We will release the optimized code publicly in a timely manner. Thank you for your interest!😄
 * **2025/06/18** : Big day! 🥰 Our **Birkhoff** code has officially gone open source. ✨ We'll be pushing updates as the saga continues. Thanks for watching, supporting! 😄 Moreover, welcome to read our previous work [**《Hyper-Compression: Model Compression via Hyperfunction》**](https://github.com/Juntongkuki/Hyper-Compression.git), which is the theoretical foundation of **Birkhoff**.
 
 
