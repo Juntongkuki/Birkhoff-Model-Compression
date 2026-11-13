@@ -1,11 +1,12 @@
 import torch
 import os
+os.environ.setdefault('TRITON_CACHE_DIR', os.path.join(os.path.dirname(os.path.abspath(__file__)), '.triton_cache'))
 import shutil
 import time
 from sam_family.load_model import SegAny
 from utils.model_encode import compress_params
 from utils.model_decode import decompress_params
-from utils.model_hyperload import load_from_hyperencoded
+from utils.model_hyperload_v2 import replace_hyperlinear_v2
 from safetensors.torch import save_file, load_file
 import matplotlib.pyplot as plt
 import cv2
@@ -77,8 +78,14 @@ def seg_box(model_class, img_file_name, res_ins):
     input_box = [input_box[0], input_box[1], input_box[0] + input_box[2], input_box[1] + input_box[3]]
     input_box = np.array(input_box)
 
-    gt_mask = mask_util.decode(res_ins_new["segmentation"])
-    prompt_points = get_points('mask-rand', gt_mask, input_box, num_points=3)
+    if 'segmentation' in res_ins_new:
+        gt_mask = mask_util.decode(res_ins_new['segmentation'])
+        prompt_points = get_points('mask-rand', gt_mask, input_box, num_points=3,
+                                   device=model_class.device)
+    else:
+        # Box-only demo prompts do not require a ground-truth segmentation.
+        prompt_points = get_points('box-center', None, input_box,
+                                   device=model_class.device)
 
 
     masks, ious, _ = predictor.predict(
@@ -98,8 +105,8 @@ def seg_box(model_class, img_file_name, res_ins):
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', type=str, default= 'encode', choices=['encode', 'inference'], help="encode : compress a given model ; inference : an inference demo of segment anything task")
-    parser.add_argument('--model_name', type=str, default='sam_hq_vit_h')
+    parser.add_argument('--mode', type=str, default= 'inference', choices=['encode', 'inference'], help="encode : compress a given model ; inference : an inference demo of segment anything task")
+    parser.add_argument('--model_name', type=str, default='sam_hq_vit_b')
     parser.add_argument('--rect_l', type=float, default=0.1, help='The length of sides of the inner square')
     parser.add_argument('--num_inner_list', type=list, default=[1225, 1600], help='The number of the sample nodes in the inner square')
     parser.add_argument('--class_max', type=int, default=3, help='The maximum number of categories of points outside the inner square')
@@ -107,8 +114,11 @@ def get_args():
     parser.add_argument('--loss_threshold', type=float, default=0.001, help='The expected loss per layer')
     parser.add_argument('--set_loss_limit', type=list, default=[True, 0.006],
                         help='If the loss of a layer exceeds this limit, the original parameters will be saved directly to prevent significant impact on model performance')
-    parser.add_argument('--checkpoint_path', type=str, default='./sam_family/checkpoints/sam_hq_vit_h.pth')
+    parser.add_argument('--checkpoint_path', type=str, default='./sam_family/checkpoints/sam_hq_vit_b.pth')
     parser.add_argument('--cuda', type=int, default=0)
+    parser.add_argument('--image_path', default='./test_data/truck.jpg')
+    parser.add_argument('--annotation_path', default='./test_data/truck_boxes.json')
+    parser.add_argument('--output_path', default='./test_data/seg_results/seg_every_hyper.png')
     return parser.parse_args()
 
 if __name__ == '__main__':
@@ -127,10 +137,11 @@ if __name__ == '__main__':
     device = f'cuda:{args.cuda}'
 
     # encoding save path
-    Save_Param_Path = f'./compressed_result/{model_name}/'
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    Save_Param_Path = f'{current_dir}/compressed_result/{model_name}/'
 
 
-    check_points = args.checkpoint_path
+    check_points = f"{current_dir}{args.checkpoint_path[1:]}"
 
 
     if mode == 'encode':
@@ -179,6 +190,7 @@ if __name__ == '__main__':
                              hyper_load=True,
                              hyper_file=hyper_file
                              )
+        replace_hyperlinear_v2(hyper_model_class.model)
         hyper_model_predictor = hyper_model_class.predictor_with_point_prompt
         hyper_model = hyper_model_class.model
 
@@ -187,10 +199,12 @@ if __name__ == '__main__':
         ###########################
         # Segment Everything Task #
         ###########################
-        img_path = './test_data/sa_145444.jpg'
-        ann_path = './test_data/sa_145444.json'
+        img_path = f"{current_dir}{args.image_path[1:]}"
+        ann_path = f"{current_dir}{args.annotation_path[1:]}"
 
         img = cv2.imread(img_path)
+        if img is None:
+            raise FileNotFoundError(f'Cannot read input image: {img_path}')
         img_hyper = cv2.imread(img_path)
         ann = json.load(open(ann_path))
 
@@ -207,7 +221,10 @@ if __name__ == '__main__':
         if mask_hyper.ndim == 2:
             mask_hyper = np.stack([mask_hyper] * 3, axis=-1)
         blended = (0.5 * img + 0.5 * mask_hyper).astype(np.uint8)
-        Image.fromarray(blended).save(f'./test_data/seg_results/seg_every_hyper.png')
+        os.makedirs(os.path.dirname(os.path.abspath(args.output_path)), exist_ok=True)
+        Image.fromarray(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)).save(args.output_path)
+        print(f'Inference finished. Segmented {len(ann["annotations"])} objects.')
+        print(f'Result saved to: {os.path.abspath(args.output_path)}')
 
 
 

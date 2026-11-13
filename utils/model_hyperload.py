@@ -52,6 +52,10 @@ import time
 #
 # ############################ Debug Setting ##################################
 
+import triton
+import triton.language as tl
+
+
 def load_from_hyperencoded(model, hyper_dict, device):
     """
     model : the model of SAM
@@ -102,16 +106,10 @@ def load_from_hyperencoded(model, hyper_dict, device):
         if '.load_type' in name:
             del hyper_dict[name]
 
-    from sam_family.accelerate.big_modeling import load_checkpoint_and_dispatch_hyperload
-    # loads the weights into modules
-    load_checkpoint_and_dispatch_hyperload(
-        model,
-        checkpoint=hyper_dict,
-        device_map={ "": device}, # balanced | auto | sequential
-        max_memory=None,
-        offload_folder=None,
-        dtype=torch.float32,
-    )
+    # Materialize meta parameters and HyperLinear buffers directly. The legacy
+    # bundled Accelerate loader imports CuPy, which this inference path does not use.
+    model.load_state_dict(hyper_dict, strict=True, assign=True)
+    model.to(device)
 
     return model
 
@@ -131,6 +129,7 @@ def replace_op_by_hyper(block, name, hyper_linear):
         setattr(block, name, hyper_linear)
 
 
+
 class HyperLinearV1(nn.Module):
         def __init__(
                 self, in_features, out_features, bias, dev, training=False
@@ -141,17 +140,10 @@ class HyperLinearV1(nn.Module):
             self.out_features = out_features
             self.training = training
 
-            # # Due to Matrix Transpose
-            # M = self.out_features
-            # N = self.in_features
 
             if self.in_features % 2 != 0:
                 self.in_features += 1
 
-
-            # quick sanity check (make sure aligment)
-            # assert self.in_features % self.group_size == 0
-            # assert out_features % (32 // self.w_bit) == 0
 
             self.register_buffer(   # to define aux params
                 "index_matrix",
@@ -175,7 +167,7 @@ class HyperLinearV1(nn.Module):
                 "U",
                 torch.zeros(
                     (1),
-                    dtype=torch.int64, # 此为真实U值而非列表索引
+                    dtype=torch.int64,
                     device=dev,
                 ),
             )
@@ -259,9 +251,6 @@ class HyperLinearV1(nn.Module):
             dtype_output = x.dtype
 
 
-            # if input_dtype != torch.float16:
-            #     x = x.half()
-
             if self.training:
                 out = HyperLinearMMFunction.apply(
                     self.index_matrix,
@@ -313,6 +302,7 @@ class HyperLinearV1(nn.Module):
 
 
 
+
 from torch.autograd import Function
 
 if torch.cuda.is_available():
@@ -339,25 +329,15 @@ class HyperLinearMMFunction(Function):
             bias=None,
             out_features=0,
         ):
-        # The forward pass can use ctx.
-        # ctx.save_for_backward(x, qweight, qzeros, scales, bias)
-        # ctx.out_features = out_features
 
         out_shape = x.shape[:-1] + (out_features,)
-        # x = x.to(torch.float16)
 
 
         if TRITON_AVAILABLE:
-            # FP16_MATMUL_HEURISTIC_CONDITION = x.shape[0] * x.shape[1] >= 1024
 
-            # if FP16_MATMUL_HEURISTIC_CONDITION:
-            #     out = awq_dequantize_triton(qweight, scales, qzeros)
-            #     out = torch.matmul(x, out)
-            # else:
+            input_T = x.reshape(-1, x.shape[-1]).T
 
-            input_T = x.reshape(-1, x.shape[-1]).T.contiguous()
-
-            out = triton_matmul_M3_2(
+            out = triton_matmul_M3_10(
                 index_matrix,
                 input_T,  # input transpose
                 dtype_output,
@@ -369,7 +349,6 @@ class HyperLinearMMFunction(Function):
                 a_jump,
                 center
             )
-
 
 
         else:
@@ -385,11 +364,12 @@ class HyperLinearMMFunction(Function):
         return out
 
 
-import triton
-import triton.language as tl
 
 
-def triton_matmul_M3_2(
+
+
+
+def triton_matmul_M3_10(
         index_matrix, # index_matrx
         input, # input
         dtype_output,
@@ -400,18 +380,7 @@ def triton_matmul_M3_2(
         node_ld,
         a_jump,
         center,
-        block_size_m: int = 64,
-        block_size_n: int = 32,
-        block_size_k: int = 32,
-        group_size_m: int = 8
-        # block_size_m: int = 32,
-        # block_size_n: int = 32,
-        # block_size_k: int = 16,
-        # group_size_m: int = 8
 ):
-
-    assert index_matrix.is_contiguous(), "矩阵A必须是连续的"
-    assert input.is_contiguous(), "矩阵B必须是连续的"
 
     M = index_matrix.shape[0]
     K_1 = index_matrix.shape[1]
@@ -421,17 +390,14 @@ def triton_matmul_M3_2(
     N = input.shape[1]
     result = torch.empty((M, N), device=index_matrix.device, dtype=dtype_output)
 
-    # 1D启动内核，每个块获得自己的程序。
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
 
-    # dis_list = torch.arange(0, K + 1) * each_dis + rect_l / 2
-    # node_factor = ((rect_l / 2) / dis_list).to(index_matrix.device)
 
     assert node_ld.is_contiguous()
     assert a_jump.is_contiguous()
     assert center.is_contiguous()
 
-    matmul_kernel_M3_2[grid](
+    matmul_kernel_M3_10[grid](
         index_matrix,
         input,
         result,
@@ -452,35 +418,26 @@ def triton_matmul_M3_2(
         node_ld_ptr=node_ld,
         a_jump_ptr=a_jump,
         center_ptr=center,
-        BLOCK_SIZE_M=block_size_m,
-        BLOCK_SIZE_N=block_size_n,
-        BLOCK_SIZE_K=block_size_k,
-        GROUP_SIZE_M=group_size_m,
-        num_stages=3,
-        num_warps=4
+        BLOCK_SIZE_M=64,
+        BLOCK_SIZE_N=64,
+        BLOCK_SIZE_K=32,
+        GROUP_SIZE_M=8,
+        num_warps=4,
+        num_stages=2,
     )
 
-    return result.T  # 输出的是转置
-
+    return result.T
 
 
 
 @triton.jit
-def matmul_kernel_M3_2(
-        a_ptr, # a
-        b_ptr, # b
-        c_ptr, # c
-        M, # M
-        N, # N
-        K_1, # K_1
-        K_2, # K_2
-        stride_am, # a.stride(0)
-        stride_ak, # a.stride(1)
-        stride_bk, # b.stride(0)
-        stride_bn, # b.stride(1)
-        stride_cm, # c.stride(0)
-        stride_cn, # c.stride(1)
-        each_dis: tl.constexpr,
+def matmul_kernel_M3_10(
+        a_ptr, b_ptr, c_ptr,
+        M, N, K_1, K_2,
+        stride_am, stride_ak,
+        stride_bk, stride_bn,
+        stride_cm, stride_cn,
+        each_dis: tl.constexpr, 
         U: tl.constexpr,
         rect_l: tl.constexpr,
         K: tl.constexpr,
@@ -492,17 +449,23 @@ def matmul_kernel_M3_2(
         BLOCK_SIZE_K: tl.constexpr,
         GROUP_SIZE_M: tl.constexpr,
 ):
-    """用于计算矩阵乘法C = A x B的内核。
-    A的形状为(M, K)，B的形状为(K, N)且C的形状为(M, N)
-    """
-    # 映射程序id `pid`到它应该计算的C块。
-    # 这是通过分组排序完成的，以促进L2数据重用。
-    # 详见上方`L2缓存优化`部分。
 
-    node_ld = tl.load(node_ld_ptr + tl.arange(0, 2))
-    a_jump = tl.load(a_jump_ptr + tl.arange(0, 2))
-    # a_jumps = tl.full((BLOCK_SIZE_M*BLOCK_SIZE_K, 1), 0, dtype=tl.float32) + a_jump
-    center = tl.load(center_ptr + tl.arange(0, 2))
+    rect_l_half = rect_l / 2.0
+    each_dis_div_rect = each_dis / rect_l_half  
+    U_INT: tl.constexpr = int(U)
+    inv_rect_l: tl.constexpr = 1.0 / rect_l  
+
+
+    node_ld_0 = tl.load(node_ld_ptr)
+    node_ld_1 = tl.load(node_ld_ptr + 1)
+    a_jump_0 = tl.load(a_jump_ptr)
+    a_jump_1 = tl.load(a_jump_ptr + 1)
+    center_0 = tl.load(center_ptr)
+    center_1 = tl.load(center_ptr + 1)
+
+
+    offset_0 = node_ld_0 - center_0
+    offset_1 = node_ld_1 - center_1
 
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
@@ -514,75 +477,87 @@ def matmul_kernel_M3_2(
     pid_m = first_pid_m + (pid % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    # 为A和B的第一个块创建指针。
-    # 我们将在K方向移动时推进这个指针并累加
-    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_am = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    mask_m = offs_am < M
+    mask_n = offs_bn < N
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
 
-    # offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    # offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_K)
-    # offs_am = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_SIZE_M), BLOCK_SIZE_M)
-    # offs_bn = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_SIZE_N), BLOCK_SIZE_N)
+    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    
+    offs_k_b0 = offs_k * 2
+    offs_k_b1 = offs_k * 2 + 1
+    b_ptrs_0 = b_ptr + (offs_k_b0[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    b_ptrs_1 = b_ptr + (offs_k_b1[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
-    offs_k_1 = tl.arange(0, BLOCK_SIZE_K) # 单个AK块在a的K维度上的偏移值
-    offs_k_2 = tl.arange(0, BLOCK_SIZE_K*2) # 单个BK块在b的K维度上的偏移值
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k_1[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k_2[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-
-
-    # BLOCK_SIZE_a_index = 1
-    # l1 = tl.full((4,1),0, dtype=tl.float32) + center
-    # l2 = tl.reshape(tl.arange(1, 5), (4,1))
-    # niubi = l1*l2
-    # 迭代计算C矩阵的一个块。
-    #####################################################################
-    if K != 0 : # 若该index matrix已被分类
-        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-        for k in range(0, tl.cdiv(K_1, BLOCK_SIZE_K)):
-            b = tl.load(b_ptrs, mask=offs_k_2[:, None] < K_2 - k * BLOCK_SIZE_K * 2, other=0.0)
-            theta = tl.cast(tl.load(a_ptrs, mask=offs_k_1[None, :] < K_1 - k * BLOCK_SIZE_K, other=0.0), dtype=tl.float32)
-            theta = tl.reshape(theta,(BLOCK_SIZE_M*BLOCK_SIZE_K,1)) # flatten a to one column
-            index_class = tl.floor(theta / U)
-            dis_list = rect_l/2 + index_class * each_dis
-            node_factor = (rect_l/2) / dis_list
-            # theta_ = tl.where(index_class != 0, theta%(index_class*U), theta)
-            theta_ = theta % U
-            # B_star = (a_jump * theta_) % rect_l + node_ld
-            # OB_star = B_star - center
-            # OC_star = OB_star / node_factor
-            # C_star = OC_star + center
-            C_star = tl.where(node_factor != 1, ((a_jump * theta_) % rect_l + node_ld - center)/node_factor + center, (a_jump * theta_) %
-                                                                                                                        rect_l + node_ld)
-            a_decode = tl.reshape(C_star, (BLOCK_SIZE_M, BLOCK_SIZE_K*2))
-            accumulator += tl.dot(a_decode, b)
-
-            a_ptrs += BLOCK_SIZE_K * stride_ak
-            b_ptrs += BLOCK_SIZE_K * (stride_bk*2)
+    if K != 0: 
+        for k_idx in range(0, tl.cdiv(K_1, BLOCK_SIZE_K)):
+            mask_k = offs_k < (K_1 - k_idx * BLOCK_SIZE_K)
+            mask_a = mask_m[:, None] & mask_k[None, :]
+            mask_b = mask_k[:, None] & mask_n[None, :]
 
 
+            b_0_f16 = tl.load(b_ptrs_0, mask=mask_b, other=0.0).to(tl.float16)
+            b_1_f16 = tl.load(b_ptrs_1, mask=mask_b, other=0.0).to(tl.float16)
+            
 
-    else: # 若该index matrix 没有被分类
-        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-        for k in range(0, tl.cdiv(K_1, BLOCK_SIZE_K)):
-            theta = tl.cast(tl.load(a_ptrs, mask=offs_k_1[None, :] < K_1 - k * BLOCK_SIZE_K, other=0.0),
-                            dtype=tl.float32)
-            b = tl.load(b_ptrs, mask=offs_k_2[:, None] < K_2 - k * BLOCK_SIZE_K * 2, other=0.0)
-            theta = tl.reshape(theta, (BLOCK_SIZE_M * BLOCK_SIZE_K, 1))  # flatten a to one column
-            B_star = (a_jump * theta) % rect_l + node_ld
-            a_decode = tl.reshape(B_star, (BLOCK_SIZE_M, BLOCK_SIZE_K * 2))
-            accumulator += tl.dot(a_decode, b)
+            theta_int = tl.load(a_ptrs, mask=mask_a, other=0).to(tl.int32)
+            
+
+            index_class = (theta_int // U_INT).to(tl.float32)
+            theta_f32 = (theta_int % U_INT).to(tl.float32)
+
+            X_0 = a_jump_0 * theta_f32
+            X_1 = a_jump_1 * theta_f32
+            mod_0_f32 = X_0 - tl.floor(X_0 * inv_rect_l) * rect_l 
+            mod_1_f32 = X_1 - tl.floor(X_1 * inv_rect_l) * rect_l
+            
+            inv_node_factor = tl.fma(index_class, each_dis_div_rect, 1.0)
+            C_0 = tl.fma((mod_0_f32 + offset_0), inv_node_factor, center_0)
+            C_1 = tl.fma((mod_1_f32 + offset_1), inv_node_factor, center_1)
+            
+            # 【优化】C 降级为 FP16 并丢入点积
+            accumulator += tl.dot(C_0.to(tl.float16), b_0_f16)
+            accumulator += tl.dot(C_1.to(tl.float16), b_1_f16)
 
             a_ptrs += BLOCK_SIZE_K * stride_ak
-            b_ptrs += BLOCK_SIZE_K * (stride_bk * 2)
+            b_ptrs_0 += BLOCK_SIZE_K * 2 * stride_bk
+            b_ptrs_1 += BLOCK_SIZE_K * 2 * stride_bk
+
+    else: 
+        for k_idx in range(0, tl.cdiv(K_1, BLOCK_SIZE_K)):
+            mask_k = offs_k < (K_1 - k_idx * BLOCK_SIZE_K)
+            mask_a = mask_m[:, None] & mask_k[None, :]
+            mask_b = mask_k[:, None] & mask_n[None, :]
+
+            b_0_f16 = tl.load(b_ptrs_0, mask=mask_b, other=0.0).to(tl.float16)
+            b_1_f16 = tl.load(b_ptrs_1, mask=mask_b, other=0.0).to(tl.float16)
+            theta_int = tl.load(a_ptrs, mask=mask_a, other=0).to(tl.int32)
+            
+            theta_f32 = theta_int.to(tl.float32)
+
+            X_0 = a_jump_0 * theta_f32
+            X_1 = a_jump_1 * theta_f32
+            
+            mod_0_f32 = X_0 - tl.floor(X_0 * inv_rect_l) * rect_l
+            mod_1_f32 = X_1 - tl.floor(X_1 * inv_rect_l) * rect_l
+            
+            B_0 = mod_0_f32 + node_ld_0
+            B_1 = mod_1_f32 + node_ld_1
+            
+            accumulator += tl.dot(B_0.to(tl.float16), b_0_f16)
+            accumulator += tl.dot(B_1.to(tl.float16), b_1_f16)
+
+            a_ptrs += BLOCK_SIZE_K * stride_ak
+            b_ptrs_0 += BLOCK_SIZE_K * 2 * stride_bk
+            b_ptrs_1 += BLOCK_SIZE_K * 2 * stride_bk
 
     c = accumulator.to(tl.float32)
-
-
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    
     c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
-
-

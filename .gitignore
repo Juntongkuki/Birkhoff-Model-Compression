@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.baiduyun.uploading.cfg
+sam_family/checkpoints/
+compressed_result/
+logs/
+.triton_cache/
+test_data/seg_results/

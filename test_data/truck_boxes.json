@@ -1,0 +1,6 @@
+{
+  "description": "Box-only demo prompt for the wheel in the official SAM truck image. This is not a ground-truth mask or an accuracy evaluation dataset. Bounding box uses COCO xywh coordinates.",
+  "annotations": [
+    {"id": 1, "bbox": [425, 600, 275, 275]}
+  ]
+}

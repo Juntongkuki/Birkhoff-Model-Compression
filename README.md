@@ -108,6 +108,60 @@ python main.py --mode='inference' --model_name='sam_hq_vit_h'
 
 
 
+## HyperLinear v2 inference
+
+`utils/model_hyperload_v2.py` adds the inference-only `HyperLinearV1_v2`.
+It keeps the compressed uint16 indices, builds a small FP16 pair codebook at
+load time, and fuses lookup, matrix multiplication and bias addition in Triton.
+The forward pass avoids v1's per-layer GPU scalar `.item()` synchronizations.
+Dense weight matrices are not cached. Existing v1 code and checkpoints are unchanged.
+
+With the environment activated and compressed SAM-HQ-B checkpoint available:
+
+```bash
+python main_v2.py --mode inference --model_name sam_hq_vit_b
+```
+
+`main_v2.py` follows the same structure, arguments and encode/inference flow as
+`main.py`. After loading the compressed model, it calls
+`replace_hyperlinear_v2(hyper_model_class.model)` from
+`utils.model_hyperload_v2` before obtaining the predictor. The existing v1
+layers are replaced in place, so the predictor uses `HyperLinearV1_v2`.
+The default mode is inference. Benchmark-specific arguments have been removed.
+
+```bash
+python main_v2.py --mode inference --model_name sam_hq_vit_b --output_path ./test_data/seg_results/seg_every_hyper_v2.png
+```
+
+For library use, `load_from_hyperencoded_v2()` loads a decoded hyper state, or
+`replace_hyperlinear_v2(model)` converts an already loaded v1 model.
+Call `prepare()` again if modifying v2's compressed buffers after loading.
+
+The following measurements are from the earlier benchmark implementation:
+
+Measured on an RTX 4060 Laptop GPU, PyTorch 2.4.1+cu124, SAM-HQ-B,
+the provided truck image and one wheel box prompt (2026-11-13):
+
+| Scope, median latency | v1 | v2 | Speedup |
+| --- | ---: | ---: | ---: |
+| Image encoding | 329.38 ms | 276.68 ms | 1.19x |
+| Decoder with cached image | 16.54 ms | 9.54 ms | 1.73x |
+| End-to-end inference | 345.64 ms | 286.99 ms | 1.20x |
+
+The 95 converted layers use 2,314,800 additional bytes of codebooks (about 2.21 MiB).
+Best-mask agreement with v1 is IoU 0.999688 on this example; maximum score
+difference is 0.000171 and maximum low-resolution logit difference is 0.573.
+FP16 Tensor Core accumulation order changes, so outputs are not bit-identical.
+This single-image comparison is a functional check, not a dataset accuracy evaluation;
+speedups depend on GPU, input shape and workload.
+
+In a 4-round, 20-sample-per-scope test on the same machine, original/v2 median
+end-to-end latency was 294.10/291.09 ms. Their p10-p90 ranges overlapped
+(289.05-300.57 / 288.14-293.93 ms), so this approximately 1% difference does not
+establish a stable speed advantage over the original model. Cached-image decoder
+latency was 8.25/8.95 ms, favoring the original. The original uses FP32 without
+autocast; v2 retains v1's FP16 Tensor Core dot inputs with FP32 accumulation.
+
 ## Acknowledgements
 We thank the following projects: [SAM](https://github.com/facebookresearch/segment-anything), [SAM2](https://github.com/facebookresearch/sam2.git), [SAM-HQ](https://github.com/SysCV/sam-hq.git), [MobileSAM](https://github.com/ChaoningZhang/MobileSAM), [MobileSAMv2](https://github.com/ChaoningZhang/MobileSAM.git), [EdgeSAM](https://github.com/chongzhou96/EdgeSAM.git), [EfficientSAM](https://github.com/yformer/EfficientSAM.git), [TinySAM](https://github.com/xinghaochen/TinySAM.git), [MedSAM](https://github.com/bowang-lab/MedSAM.git).
 

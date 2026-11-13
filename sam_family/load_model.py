@@ -3,13 +3,14 @@ import torch
 import platform
 osplatform = platform.system()
 import numpy as np
-from .accelerate import init_empty_weights
-from .accelerate import load_checkpoint_and_dispatch
+from accelerate import init_empty_weights
 
 
 
 def load_model_dipatch(checkpoint:str, model_name:str, rect_l:float, hyper_inference_mode:str,
                        sam_model_registry, model_type):
+    # The legacy dispatch path uses the bundled, customized Accelerate version.
+    from .accelerate import load_checkpoint_and_dispatch
     # decoding files path
     # Decode_Param_Path = checkpoint + f'/{model_name}_l_{str(rect_l)[0] + str(rect_l)[2:]}'
 
